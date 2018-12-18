@@ -18,6 +18,8 @@ import coref_ops
 import conll
 import metrics
 
+import rnet
+
 class CorefModel(object):
   def __init__(self, config):
     self.config = config
@@ -273,7 +275,9 @@ class CorefModel(object):
 
     text_len_mask = tf.sequence_mask(text_len, maxlen=max_sentence_length) # [num_sentence, max_sentence_length]
 
-    context_outputs = self.lstm_contextualize(context_emb, text_len, text_len_mask) # [num_words, emb]
+    # context_outputs = self.lstm_contextualize(context_emb, text_len, text_len_mask) # [num_words, emb]
+    # context_outputs = self.cnn_contextualize(context_emb, text_len, text_len_mask) # [num_words, emb]
+    context_outputs = self.rnet_contextualize(context_emb, text_len, text_len_mask) # [num_words, emb]
     num_words = util.shape(context_outputs, 0)
 
     genre_emb = tf.gather(tf.get_variable("genre_embeddings", [len(self.genres), self.config["feature_size"]]), genre) # [emb]
@@ -484,6 +488,70 @@ class CorefModel(object):
           text_outputs = highway_gates * text_outputs + (1 - highway_gates) * current_inputs
         current_inputs = text_outputs
 
+    return self.flatten_emb_by_sentence(text_outputs, text_len_mask)
+
+  # second replacement of bidirectional lstm
+  def rnet_contextualize(self, text_emb, text_len, text_len_mask):
+    # initialize data input
+    current_inputs = text_emb
+    batch_size = util.shape(text_emb, 0)
+    batch_size_first = util.shape(current_inputs, 0)
+    seq_len_first = util.shape(current_inputs, 1)
+    hidden_size_first = util.shape(current_inputs, 2)
+    #A_prev = tf.nn.sigmoid(tf.matmul(current_inputs, tf.transpose(current_inputs, [0, 2, 1])))
+
+    # iterate through layers
+    for layer in range(self.config["contextualization_layers"]):
+        # save current layer to tf
+        with tf.variable_scope("conv_%d_gtcn" % layer):
+            # generate penalizing mask
+            # seq_len = tf.cast(util.shape(current_inputs, 1), tf.int32)
+            # seq = tf.reshape(tf.range(seq_len), (1, -1))
+            # word_dist = tf.expand_dims(seq - tf.transpose(seq), 0)
+            # word_dist = tf.cast(word_dist, tf.float32)
+            # pen_mask_1 = tf.cast(word_dist < 0, tf.float32)
+            # pen_mask_1 = word_dist * pen_mask_1
+            # pen_mask_2 = tf.cast(word_dist > 0, tf.float32)
+            # pen_mask_2 = word_dist * pen_mask_2 * (-1)
+            # pen_const = 1
+            # pen_mask = (pen_mask_1 + pen_mask_2) * pen_const
+
+            # current_inputs = tf.reshape(current_inputs, [batch_size, seq_len, -1])
+            # initialize SimpleGTCNBlock, parameters to be edited
+            gtcn = rnet.RNet(n_outputs = self.config["contextualization_size"], 
+                                kernel_size = 3,
+                                strides = 1, 
+                                dilation = 1,
+                                window = 10, 
+                                # pen_mask = pen_mask,
+                                dropout_keep = 1 - self.config["dropout_rate"])
+            # fit in data
+            text_outputs = rnet(current_inputs)
+            # text_outputs = tf.nn.dropout(text_outputs, 0.8)
+            current_inputs = text_outputs 
+            #A_prev = At
+    # flatten and return result
+    return self.flatten_emb_by_sentence(text_outputs, text_len_mask)
+
+  # replace lstm by cnn
+  def cnn_contextualize(self, text_emb, text_len, text_len_mask):
+    # initialize input data
+    # num_sentences = tf.shape(text_emb)[0], 
+    # max_sentence_length = tf.shape(text_emb)[1],
+    # emb_len = tf.shape(text_emb)[2]
+    current_inputs = text_emb # [num_sentences, max_sentence_length, emb]
+    # iterate through layers
+    for layer in range(self.config["contextualization_layers"]):
+      # initialize cnn layer
+      with tf.variable_scope("conv_%d" % layer):
+        conv1 = tf.layers.conv1d(inputs = current_inputs, 
+                                filters = self.config["contextualization_size"],
+                                kernel_size = 3, padding = 'same', 
+                                activation = tf.nn.relu)
+        # process the output
+        text_outputs = conv1
+        text_outputs = tf.nn.dropout(text_outputs, self.lstm_dropout)
+        current_inputs = text_outputs
     return self.flatten_emb_by_sentence(text_outputs, text_len_mask)
 
   def get_predicted_antecedents(self, antecedents, antecedent_scores):
