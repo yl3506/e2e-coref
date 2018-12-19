@@ -19,6 +19,7 @@ import conll
 import metrics
 
 import rnet
+import rnet2
 
 class CorefModel(object):
   def __init__(self, config):
